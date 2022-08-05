@@ -1,74 +1,84 @@
+import cors from 'cors';
 import dotenv from 'dotenv';
-import express from 'express';
+import express, { RequestHandler } from 'express';
 import asyncHandler from 'express-async-handler';
 import fs from 'fs';
+import http from 'http';
 import https from 'https';
 
-import { initDb } from './datastore';
-import { signInHandler, signUpHandler } from './handlers/authHandler';
-import {
-  createCommentHandler,
-  deleteCommentHandler,
-  getCommentsHandler,
-} from './handlers/commentHandler';
-import { createLikeHandler, getLikesHandler } from './handlers/likeHandler';
-import {
-  createPostHandler,
-  deletePostHandler,
-  getPostHandler,
-  listPostsHandler,
-} from './handlers/postHandler';
+import { db, initDb } from './datastore';
+import { ENDPOINT_CONFIGS, Endpoints } from './endpoints';
+import { AuthHandler } from './handlers/authHandler';
+import { CommentHandler } from './handlers/commentHandler';
+import { LikeHandler } from './handlers/likeHandler';
+import { PostHandler } from './handlers/postHandler';
 import { authMiddleware } from './middleware/authMiddleware';
 import { errHandler } from './middleware/errorMiddleware';
 import { loggerMiddleware } from './middleware/loggerMiddleware';
 
-(async () => {
-  await initDb();
-  //Read .env file
+export async function createServer(dbPath: string, logRequests = true) {
+  await initDb(dbPath);
+  // read .env file
   dotenv.config();
 
-  //run express lib
+  // create express app
   const app = express();
 
-  //It parses incoming requests with JSON payloads and is based on body-parser.
+  // middlewares for parsing JSON payloads and opening up cors policy
   app.use(express.json());
+  app.use(cors());
 
-  //Log incoming Requests
-  app.use(loggerMiddleware);
+  if (logRequests) {
+    //Log incoming Requests
+    app.use(loggerMiddleware);
+  }
 
-  //Public endpoints
-  app.get('/healthz', (_, res) => res.send({ status: 'OK' }));
-  app.post('/v1/signup', asyncHandler(signUpHandler));
-  app.post('/v1/signin', asyncHandler(signInHandler));
+  const authHandler = new AuthHandler(db);
+  const postHandler = new PostHandler(db);
+  const likeHandler = new LikeHandler(db);
+  const commentHandler = new CommentHandler(db);
 
-  app.use(authMiddleware);
+  // Map of endpoints handlers
+  const HANDLERS: { [key in Endpoints]: RequestHandler<any, any> } = {
+    [Endpoints.healthz]: (_, res) => res.send({ status: 'ok!' }),
 
-  //Private endpoints
-  app.get('/v1/posts', asyncHandler(listPostsHandler));
-  app.post('/v1/posts', asyncHandler(createPostHandler));
-  app.delete('/v1/posts/:id', asyncHandler(deletePostHandler));
-  app.get('/v1/posts/:id', asyncHandler(getPostHandler));
+    [Endpoints.signin]: authHandler.signInHandler,
+    [Endpoints.signup]: authHandler.signUpHandler,
 
-  app.post('/v1/likes/new', asyncHandler(createLikeHandler));
-  app.get('/v1/likes/:postId', asyncHandler(getLikesHandler));
+    [Endpoints.listPosts]: postHandler.listPostsHandler,
+    [Endpoints.getPost]: postHandler.getPostHandler,
+    [Endpoints.createPost]: postHandler.createPostHandler,
+    [Endpoints.deletePost]: postHandler.deletePostHandler,
 
-  app.post('/v1/comments/new', asyncHandler(createCommentHandler));
-  app.get('/v1/comments/:postId', asyncHandler(getCommentsHandler));
-  app.delete('/v1/comments/:id', asyncHandler(deleteCommentHandler));
+    [Endpoints.listLikes]: likeHandler.listLikesHandler,
+    [Endpoints.createLike]: likeHandler.createLikeHandler,
+
+    [Endpoints.listComments]: commentHandler.listCommentsHandler,
+    [Endpoints.createComment]: commentHandler.createCommentHandler,
+    [Endpoints.deleteComment]: commentHandler.deleteCommentHandler,
+  };
+
+  // Register handlers in express
+  Object.keys(Endpoints).forEach(entry => {
+    const config = ENDPOINT_CONFIGS[entry as Endpoints];
+    const handler = HANDLERS[entry as Endpoints];
+
+    config.auth
+      ? app[config.method](config.url, authMiddleware, asyncHandler(handler))
+      : app[config.method](config.url, asyncHandler(handler));
+  });
 
   app.use(errHandler);
 
-  const port = process.env.PORT;
-  const env = process.env.ENV;
+  // Start server, https in production, otherwise http.
+  const { ENV } = process.env;
 
-  const listener = () => console.log(`Listening on port ${port} on ${env} environment`);
-
-  if (env === 'production') {
+  if (ENV === 'production') {
     const key = fs.readFileSync('/home/codersquare-user/certs/privkey1.pem', 'utf-8');
     const cert = fs.readFileSync('/home/codersquare-user/certs/cert1.pem', 'utf-8');
 
-    https.createServer({ key, cert }, app).listen(port, listener);
+    return https.createServer({ key, cert }, app);
   } else {
-    app.listen(port, listener);
+    return http.createServer(app);
   }
-})();
+}
